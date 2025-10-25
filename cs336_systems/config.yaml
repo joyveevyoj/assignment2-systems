@@ -1,0 +1,36 @@
+# Model architecture parameters
+model:
+  d_model: 768          # Dimension of embeddings and hidden states
+  num_heads: 12          # Number of attention heads
+  num_layers: 12         # Number of transformer blocks
+  d_ff: 3072          # Dimension of feedforward layer
+  vocab_size: 50257     # Size of vocabulary
+  context_length: 256  # Maximum sequence length
+  rope_theta: 10000.0   # RoPE theta parameter
+
+# Training hyperparameters
+training:
+  batch_size: 32
+  learning_rate: 1e-3   # Maximum learning rate
+  min_lr: 1e-4         # Minimum learning rate for cosine schedule
+  warmup_iters: 1000   # Number of warmup iterations
+  max_tokens:   327680000  # Total number of tokens
+  weight_decay: 0.01   # AdamW weight decay
+  betas: [0.9, 0.95]   # AdamW beta parameters
+  eps: 1e-8            # AdamW epsilon parameter
+  gradient_clip: 1.0   # Gradient clipping threshold
+
+# Data paths and settings
+data:
+  train_file: "data/TinyStoriesV2-GPT4-train.txt"
+  valid_file: "data/TinyStoriesV2-GPT4-valid.txt"
+  checkpoint_dir: "checkpoints"
+  tokenizer_path: "cs336_basics/results"  # Directory containing vocab.json and merges.json
+
+# Logging and evaluation settings
+logging:
+  eval_interval: 1000   # Steps between validation
+  save_interval: 5000   # Steps between checkpoints
+  log_interval: 100     # Steps between logging to wandb
+  project_name: "cs336-transformer"  # wandb project name
+  experiment_name: "tiny-stories-transformer"  # Experiment name for wandb
