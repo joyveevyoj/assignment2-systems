@@ -164,11 +164,8 @@ def get_training_config(config_path: str = 'cs336_systems/config.yaml') -> Train
 
 
 def benchmark(description: str, fn: callable, num_warmups: int=1, num_trials: int =3):
-    # warmup run
-    print("in test")
     for _ in range(num_warmups):
         fn()
-    print("warm up finished")
     if torch.cuda.is_available():
         torch.cuda.synchronize() #wait for Cuda threads to finish
     times=[]
@@ -191,7 +188,6 @@ def benchmark(description: str, fn: callable, num_warmups: int=1, num_trials: in
 def main():
     config = get_training_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nUsing device: {device}")
     # model initialization
     model = BasicsTransformerLM (
         d_model=config.d_model,
