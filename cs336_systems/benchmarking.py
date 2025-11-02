@@ -223,7 +223,7 @@ def main():
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
+    
     run = forward_backward_run
     print("start benchmarking")
     benchmark(description ="model forward and backward run", fn = run, num_warmups =1, num_trials = 2)
