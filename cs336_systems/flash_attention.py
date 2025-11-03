@@ -132,7 +132,7 @@ def flash_attention_fwd(
     strides = (stride_lq, ),
     offsets =  (query_tile_index * Q_TILE_SIZE, ),
     block_shape =(Q_TILE_SIZE,),
-    order =(1, 0),
+    order =(0,),
     )
     # load Qi
     Q_i = tl.load (Q_block_ptr, boundary_check = (0, ), padding_option = "zero")
@@ -157,12 +157,12 @@ def flash_attention_fwd(
         if is_causal:
             causal_mask = offs_q[:, None] >= offs_k[None, :]
             S_ij = tl.where(causal_mask, S_ij, float('-1e6'))
-        m_new = tl.max(m_running, tl.max(S_ij, axis = 1))
+        m_new = tl.maximum(m_running, tl.max(S_ij, axis = 1))
         alpha = tl.exp (m_running - m_new)
         P_ij = tl.exp(S_ij - m_new[:, None])
         P_ij_casted = P_ij.to(V_j.dtype)
         l_new = alpha * l_running + tl.sum(P_ij, axis = 1)
-        O_running = alpha[:, None] * O_running + tl.dot(P_ij_casted, V_j, acc= O_running)
+        O_running = alpha[:, None] * O_running + tl.dot(P_ij_casted, V_j)
         m_running, l_running  = m_new, l_new
         K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
         V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
