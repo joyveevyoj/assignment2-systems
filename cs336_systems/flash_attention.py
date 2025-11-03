@@ -70,6 +70,7 @@ class FlashAttention2Function(torch.autograd.Function):
     def backward(ctx, grad_output):
         raise NotImplementedError("Backward pass not implemented yet.")
 
+
 @triton.jit
 def flash_attention_fwd(
     Q_ptr, K_ptr, V_ptr,  
@@ -83,6 +84,7 @@ def flash_attention_fwd(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
+    is_causal : tl.constexpr,
     ):
     # no causal mask yet
     # program indices
@@ -136,28 +138,34 @@ def flash_attention_fwd(
     )
     # load Qi
     Q_i = tl.load (Q_block_ptr, boundary_check = (0, ), padding_option = "zero")
-
+    # create row indices for current query tile
+    offs_q = query_tile_index * Q_TILE_SIZE + tl.arange (0, Q_TILE_SIZE)
     # Initialize running buffer
-    acc = tl.float32
-    O_running = tl.zeros((Q_TILE_SIZE,D), dtype = acc)
-    l_running = tl.zeros((Q_TILE_SIZE,), dtype = acc)
-    m_running = tl.full((Q_TILE_SIZE,), -float('inf'),  dtype = acc)
+    O_running = tl.zeros((Q_TILE_SIZE,D), dtype = tl.float32)
+    l_running = tl.zeros((Q_TILE_SIZE,), dtype = tl.float32)
+    m_running = tl.full((Q_TILE_SIZE,), -float('inf'),  dtype = tl.float32)
 
 
     # Computation in a for loop
     for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+        # create row indices for current query
+        offs_k = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
         # load K_j and V_J
         K_j = tl.load (K_block_ptr, boundary_check = (0,), padding_option = "zero") # is this boundary check correct? 
         V_j = tl.load (V_block_ptr, boundary_check = (0,), padding_option = "zero")
         # compute flash attention parameters
-        S_ij = tl.dot (Q_i, tl.trans(K_j), acc = acc) * scale
+        S_ij = tl.dot (Q_i, tl.trans(K_j)) * scale
+        # apply causal mask if needed
+        if is_causal:
+            causal_mask = offs_q[:, None] >= offs_k[None, :]
+            S_ij = tl.where(causal_mask, S_ij, float('-1e6'))
         m_new = tl.max(m_running, tl.max(S_ij, axis = 1))
         alpha = tl.exp (m_running - m_new)
         P_ij = tl.exp(S_ij - m_new[:, None])
         P_ij_casted = P_ij.to(V_j.dtype)
         l_new = alpha * l_running + tl.sum(P_ij, axis = 1)
-        O_new = alpha[:, None] * O_running + tl.dot(P_ij_casted, V_j, acc = acc)
-        m_running, l_running, O_running = m_new, l_new, O_new
+        O_running = alpha[:, None] * O_running + tl.dot(P_ij_casted, V_j, acc= O_running)
+        m_running, l_running  = m_new, l_new
         K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
         V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
     # final computation and store back
@@ -166,9 +174,39 @@ def flash_attention_fwd(
     tl.store (O_block_ptr, O_final, boundary_check = (0,))
     tl.store(L_block_ptr, L_final, boundary_check = (0,))
 
+
+@torch.compile(fullgraph=True)
+def flash_attention_bwd(
+    Q, K, V, dO, O, L, is_causal):
+    B, Nq, d = Q.shape
+    _, Nk, d = K.shape
+    scale = 1.0/ math.sqrt(d)
+    # use the equation 13 -19
+    D = (O * dO).sum(dim = -1)
+    S = einsum (Q, K, 'b q d, b k d -> b q k') * scale
+    if is_causal:
+        q_idx = torch.arange(Nq, device=Q.device)[:, None]
+        k_idx = torch.arange(Nk, device=Q.device)[None, :]
+        S = torch.where(k_idx <= q_idx, S, S.new_full((), -1e6))
+
+    P = torch.exp(S - L[..., None])
+    dV = einsum (P, dO, 'b q k, b q d -> b k d')
+    dP = einsum (dO, V, 'b q d, b k d -> b q k')
+    dS = P *(dP - D[..., None])
+    if is_causal:
+        # Zero gradients in masked positions (must match forward)
+        dS = torch.where(k_idx <= q_idx, dS, torch.zeros_like(dS))
+    dQ = einsum (dS, K, 'b q k, b k d -> b q d') *scale
+    dK = einsum (dS, Q, 'b q k, b q d -> b k d') * scale
+    return dQ, dK, dV
+
+
+    
+
+
 class FlashAttention_triton(torch.autograd.Function):
     @ staticmethod
-    def forward(ctx, K, Q, V):
+    def forward(ctx, Q, K, V, is_causal = False):
         B, Nq, D = Q.shape
         _, Nk, _ = K.shape
         Q_TILE_SIZE = 16
@@ -190,14 +228,21 @@ class FlashAttention_triton(torch.autograd.Function):
             L.stride(0), L.stride(1),
             Nq, Nk,
             scale, 
-            D = D, Q_TILE_SIZE = Q_TILE_SIZE
+            D = D, Q_TILE_SIZE = Q_TILE_SIZE,  K_TILE_SIZE=K_TILE_SIZE,
+            is_causal = is_causal, 
         )
         # Save tensors for backward
+        ctx.is_causal = is_causal 
         ctx.save_for_backward(L, Q, K, V, O)
         return O
+
+
+
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError("Backward pass not implemented yet.")
+       L, Q, K, V, O = ctx.saved_tensors
+       dQ, dK, dV  = flash_attention_bwd (Q, K, V, grad_output, O, L, ctx.is_causal)
+       return dQ, dK, dV, None
 
 
 
